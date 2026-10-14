@@ -1,0 +1,682 @@
+const express = require('express');
+const cors = require('cors');
+const mysql = require('mysql2');
+require('dotenv').config();
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
+const bcrypt = require('bcrypt');
+
+const app = express();
+
+app.use(cors());
+app.use(express.json());
+
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+
+if (!fs.existsSync('uploads')) {
+  fs.mkdirSync('uploads');
+}
+
+// Multer Dosya Yükleme Ayarları
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, 'uploads/');
+  },
+  filename: (req, file, cb) => {
+    cb(null, req.params.id + '-' + Date.now() + path.extname(file.originalname));
+  }
+});
+const upload = multer({ storage: storage });
+
+// MySQL Bağlantısı
+const db = mysql.createPool({
+  host: process.env.DB_HOST,
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD,
+  database: process.env.DB_NAME
+});
+
+// --- 1. KAYIT OL (REGISTER) API'Sİ ---
+app.post('/api/kayit', async (req, res) => {
+  const { ad_soyad, email, sifre, rol, uzmanlik, tecrube, slogan, hakkinda } = req.body;
+
+  try {
+    const hashedPassword = await bcrypt.hash(sifre, 10);
+
+    const query = "INSERT INTO kullanicilar (ad_soyad, email, sifre, rol, uzmanlik, tecrube, slogan, hakkinda) VALUES (?, ?, ?, ?, ?, ?, ?, ?)";
+    
+    const degerler = [
+      ad_soyad, 
+      email, 
+      hashedPassword, 
+      rol || 'danisan', 
+      rol === 'terapist' ? uzmanlik : null, 
+      rol === 'terapist' ? tecrube : null, 
+      rol === 'terapist' ? slogan : null, 
+      rol === 'terapist' ? hakkinda : null
+    ];
+
+    db.query(query, degerler, (err, result) => {
+      if (err) {
+        if (err.code === 'ER_DUP_ENTRY') {
+          return res.status(400).json({ mesaj: "Bu email adresi zaten kullanımda." });
+        }
+        console.error(err);
+        return res.status(500).json({ mesaj: "Veritabanı kaydı sırasında hata oluştu." });
+      }
+      
+      res.status(201).json({ 
+        mesaj: "Kayıt başarıyla tamamlandı!", 
+        kullanici_id: result.insertId 
+      });
+    });
+  } catch (error) {
+    res.status(500).json({ mesaj: "Sunucu hatası." });
+  }
+});
+
+// --- 2. GİRİŞ YAP (LOGIN) API'Sİ ---
+app.post('/api/giris', (req, res) => {
+  const { email, sifre, rol } = req.body; 
+
+  try {
+    const query = "SELECT * FROM kullanicilar WHERE email = ?";
+    
+    db.query(query, [email], async (err, results) => {
+      if (err) {
+        console.error("DB Hatası:", err);
+        return res.status(500).json({ mesaj: "Veritabanı hatası oluştu." });
+      }
+
+      if (results.length === 0) {
+        return res.status(404).json({ mesaj: "Bu e-posta adresine ait bir hesap bulunamadı." });
+      }
+
+      const kullanici = results[0]; 
+
+      if (kullanici.rol !== rol) {
+        const hataMesaji = rol === 'terapist' 
+          ? "Bu e-posta bir Danışan hesabına aittir. Lütfen 'Danışan Girişi'ni seçerek tekrar deneyin." 
+          : "Bu e-posta bir Terapist hesabına aittir. Lütfen 'Terapist Girişi'ni seçerek tekrar deneyin.";
+        return res.status(401).json({ mesaj: hataMesaji });
+      }
+
+      const sifreDogrumu = await bcrypt.compare(sifre, kullanici.sifre);
+
+      if (!sifreDogrumu) {
+        return res.status(401).json({ mesaj: "Hatalı şifre girdiniz." });
+      }
+
+      res.status(200).json({
+        mesaj: "Giriş başarılı! Yönlendiriliyorsunuz...",
+        kullanici: {
+          id: kullanici.id,
+          ad_soyad: kullanici.ad_soyad,
+          email: kullanici.email,
+          rol: kullanici.rol
+        }
+      });
+    });
+  } catch (globalError) {
+    console.error("Sunucu Kritik Hata:", globalError);
+    res.status(500).json({ mesaj: "Sunucu tarafında beklenmedik bir hata oluştu." });
+  }
+});
+
+// --- 3. TERAPİST TOHUMLAMA (SEEDING) API'Sİ ---
+app.get('/api/seed', async (req, res) => {
+  const standartSifre = "123456"; 
+  const terapistler = [
+    { ad_soyad: 'Dr. Seda Yılmaz', email: 'seda@mindcare.com', uzmanlik: 'Anksiyete & Depresyon', egitim: 'ODTÜ - Klinik Psikoloji', tecrube: '10 Yıl', slogan: '"Her duygu yaşanmayı hak eder, yeter ki sizi yönetmesin."', detay: 'Panik atak ve stres yönetimi üzerine 10 yıllık tecrübemle, kanıta dayalı BDT yöntemleri uyguluyorum.', avatar: 'SY' },
+    { ad_soyad: 'Dr. Mert Çelik', email: 'mert@mindcare.com', uzmanlik: 'Stres Yönetimi', egitim: 'Hacettepe Üniversitesi - Psikoloji', tecrube: '8 Yıl', slogan: '"Kariyer ve hayat dengenizi yeniden kuralım."', detay: 'İş hayatı stresi, tükenmişlik sendromu ve kariyer odaklı krizlerde çözüm odaklı profesyonel terapi sunuyorum.', avatar: 'MÇ' },
+    { ad_soyad: 'Dr. Elif Parkan', email: 'elif@mindcare.com', uzmanlik: 'İlişki Terapisi', egitim: 'Ankara Üniversitesi - Psikoloji', tecrube: '15 Yıl', slogan: '"Sağlıklı bağlar, sağlıklı yarınlar yaratır."', detay: 'Çift terapisi ve aile danışmanlığı alanında uzmanım. İletişim problemlerini çözmek ana odak noktamdır.', avatar: 'EP' },
+    { ad_soyad: 'Dr. Can Vural', email: 'can@mindcare.com', uzmanlik: 'Bilişsel Davranışçı Terapi', egitim: 'İstanbul Üniversitesi - Psikoloji', tecrube: '6 Yıl', slogan: '"Düşüncelerinizi değiştirin, dünyanız değişsin."', detay: 'Bilişsel Davranışçı Terapi (BDT) ile somut ve kalıcı çözümler üreterek danışanlarıma rehberlik ediyorum.', avatar: 'CV' }
+  ];
+
+  try {
+    const hashedPassword = await bcrypt.hash(standartSifre, 10);
+    for (let t of terapistler) {
+      const query1 = "INSERT INTO kullanicilar (ad_soyad, email, sifre, rol) VALUES (?, ?, ?, 'terapist')";
+      const [result] = await db.promise().query(query1, [t.ad_soyad, t.email, hashedPassword]);
+      const yeniKullaniciId = result.insertId; 
+
+      const query2 = "INSERT INTO terapist_detaylari (kullanici_id, uzmanlik, egitim, tecrube, slogan, detay, avatar) VALUES (?, ?, ?, ?, ?, ?, ?)";
+      await db.promise().query(query2, [yeniKullaniciId, t.uzmanlik, t.egitim, t.tecrube, t.slogan, t.detay, t.avatar]);
+    }
+    res.send("Tüm terapistler veritabanına başarıyla eklendi! Şifreleri: 123456");
+  } catch (error) {
+    if (error.code === 'ER_DUP_ENTRY') {
+      res.send("Terapistler zaten veritabanında mevcut! (Daha önce eklenmiş)");
+    } else {
+      console.error(error);
+      res.status(500).send("Bir hata oluştu.");
+    }
+  }
+});
+
+// --- 4. TERAPİSTLERİ GETİR (GET) API'Sİ (ORİJİNAL VE KURŞUN GEÇİRMEZ VERSİYON) ---
+app.get('/api/terapistler', (req, res) => {
+  const query = `
+    SELECT 
+      k.id, 
+      k.ad_soyad AS isim, 
+      t.uzmanlik, 
+      t.egitim, 
+      t.tecrube, 
+      t.slogan, 
+      t.detay, 
+      t.avatar 
+    FROM kullanicilar k
+    LEFT JOIN terapist_detaylari t ON k.id = t.kullanici_id
+    WHERE k.rol = 'terapist'
+  `;
+  db.query(query, (err, results) => {
+    if (err) {
+      console.error("Terapist Getirme Hatası:", err);
+      return res.status(500).json({ mesaj: "Veritabanı hatası oluştu." });
+    }
+    res.status(200).json(results);
+  });
+});
+
+// --- 5. RANDEVU OLUŞTURMA (POST) API'Sİ ---
+app.post('/api/randevu', (req, res) => {
+  const { danisan_id, terapist_id, randevu_tarihi } = req.body;
+  const query = "INSERT INTO randevular (danisan_id, terapist_id, randevu_tarihi, durum) VALUES (?, ?, ?, 'onaylandi')";
+  db.query(query, [danisan_id, terapist_id, randevu_tarihi], (err, result) => {
+    if (err) return res.status(500).json({ mesaj: "Randevu oluşturulurken veritabanı hatası meydana geldi." });
+    res.status(201).json({ mesaj: "Randevunuz başarıyla oluşturuldu!" });
+  });
+});
+
+// --- 6. ZEYNEP HOCAYI EKLEME API'Sİ ---
+app.get('/api/zeynep-ekle', async (req, res) => {
+  try {
+    const hashedPassword = await bcrypt.hash('123456', 10);
+    const q1 = "INSERT INTO kullanicilar (ad_soyad, email, sifre, rol) VALUES (?, ?, ?, 'terapist')";
+    const [result] = await db.promise().query(q1, ['Dr. Zeynep Taşkın', 'zeynep@mindcare.com', hashedPassword]);
+    
+    const q2 = "INSERT INTO terapist_detaylari (kullanici_id, uzmanlik, egitim, tecrube, slogan, detay, avatar) VALUES (?, ?, ?, ?, ?, ?, ?)";
+    await db.promise().query(q2, [result.insertId, 'Klinik Psikolog', 'Boğaziçi Üniversitesi', '12 Yıl', '"İçsel huzur, kendinizi anlamakla başlar."', 'Anksiyete ve depresyon konusunda uzmanım.', 'ZT']);
+    res.send("Zeynep Hoca başarıyla veritabanına eklendi! Şifre: 123456");
+  } catch (error) {
+    if (error.code === 'ER_DUP_ENTRY') res.send("Zeynep Hoca zaten veritabanında mevcut.");
+    else res.status(500).send("Bir hata oluştu.");
+  }
+});
+
+// --- 7. DOLU SAATLERİ KONTROL ETME (POST) API'Sİ (GÜNCELLENDİ) ---
+app.post('/api/dolu-saatler', (req, res) => {
+  const { terapist_id, tarih } = req.body;
+  const arananTarih = tarih + '%'; 
+  
+  const kapaliQuery = "SELECT * FROM randevular WHERE terapist_id = ? AND randevu_tarihi LIKE ? AND durum = 'kapali_gun'";
+  
+  db.query(kapaliQuery, [terapist_id, arananTarih], (err, kapaliSonuc) => {
+    if (err) return res.status(500).json({ mesaj: "Veritabanı hatası" });
+
+    // Gün kapalıysa tüm saatleri dolu olarak dön
+    if (kapaliSonuc && kapaliSonuc.length > 0) {
+      return res.status(200).json([
+        "09:00", "10:00", "11:00", "12:00", "13:00", 
+        "14:00", "15:00", "16:00", "17:00"
+      ]);
+    }
+    
+    const doluQuery = "SELECT TIME_FORMAT(randevu_tarihi, '%H:%i') as saat FROM randevular WHERE terapist_id = ? AND randevu_tarihi LIKE ? AND durum = 'onaylandi'";
+    db.query(doluQuery, [terapist_id, arananTarih], (err, results) => {
+      if (err) return res.status(500).json({ mesaj: "Veritabanı hatası" });
+      res.status(200).json(results.map(r => r.saat));
+    });
+  });
+});
+// --- 8. DANIŞANA AİT RANDEVULARI GETİR (GET) API'Sİ ---
+app.get('/api/randevular/:danisanId', (req, res) => {
+  const danisanId = req.params.danisanId;
+  const query = `
+    SELECT 
+      r.id, 
+      k.ad_soyad AS doktor, 
+      COALESCE(t.uzmanlik, 'Uzman Terapist') AS uzmanlik, 
+      COALESCE(t.avatar, '👤') AS avatar, 
+      r.randevu_tarihi AS zaman
+    FROM randevular r
+    JOIN kullanicilar k ON r.terapist_id = k.id
+    LEFT JOIN terapist_detaylari t ON k.id = t.kullanici_id
+    WHERE r.danisan_id = ? AND r.durum = 'onaylandi'
+    ORDER BY r.randevu_tarihi ASC
+  `;
+  db.query(query, [danisanId], (err, results) => {
+    if (err) return res.status(500).json({ mesaj: "Veritabanı hatası" });
+    res.status(200).json(results);
+  });
+});
+
+// --- 9. RANDEVU İPTAL ETME (DELETE) API'Sİ ---
+// --- RANDEVU İPTALİ VE OTOMATİK BİLDİRİM API'Sİ ---
+app.delete('/api/randevu-iptal/:id', (req, res) => {
+  const randevuId = req.params.id;
+  const { iptalEdenRol, iptalEdenIsim } = req.body;
+
+  // 1. Önce randevu bilgilerini bul (Kim kiminle randevuluydu öğrenelim)
+  db.query("SELECT * FROM randevular WHERE id = ?", [randevuId], (err, randevuRes) => {
+    if (err || randevuRes.length === 0) return res.status(500).json({ mesaj: "Randevu bulunamadı" });
+
+    const randevu = randevuRes[0];
+    
+    // İptal edene göre alıcıyı ve göndereni belirliyoruz
+    const gonderenId = iptalEdenRol === 'terapist' ? randevu.terapist_id : randevu.danisan_id;
+    const aliciId = iptalEdenRol === 'terapist' ? randevu.danisan_id : randevu.terapist_id;
+    
+    const mesajMetni = `🚨 SİSTEM BİLDİRİMİ: ${randevu.randevu_tarihi} saat ${randevu.randevu_saati} tarihindeki randevunuz, ${iptalEdenRol === 'terapist' ? 'terapistiniz' : 'danışanınız'} ${iptalEdenIsim} tarafından iptal edilmiştir.`;
+
+    // 2. Randevuyu veritabanından sil
+    db.query("DELETE FROM randevular WHERE id = ?", [randevuId], (err2) => {
+       if (err2) return res.status(500).json({ mesaj: "İptal edilemedi" });
+
+       // 3. Karşı tarafın mesaj kutusuna bildirimi fırlat!
+       db.query("INSERT INTO mesajlar (gonderen_id, alici_id, icerik) VALUES (?, ?, ?)", [gonderenId, aliciId, mesajMetni], () => {
+           res.status(200).json({ mesaj: "İptal edildi ve bildirim gönderildi." });
+       });
+    });
+  });
+});
+
+// --- 10. KULLANICI PROFİLİ GÜNCELLEME API'Sİ ---
+app.put('/api/kullanici-guncelle/:id', async (req, res) => { 
+  const kullaniciId = req.params.id;
+  const { ad_soyad, email, sifre } = req.body; 
+  
+  let query, params;
+  if (sifre && sifre.trim() !== '') {
+    try {
+      const hashedSifre = await bcrypt.hash(sifre, 10);
+      query = "UPDATE kullanicilar SET ad_soyad = ?, email = ?, sifre = ? WHERE id = ?";
+      params = [ad_soyad, email, hashedSifre, kullaniciId];
+    } catch (err) {
+      return res.status(500).json({ mesaj: "Şifreleme hatası." });
+    }
+  } else {
+    query = "UPDATE kullanicilar SET ad_soyad = ?, email = ? WHERE id = ?";
+    params = [ad_soyad, email, kullaniciId];
+  }
+
+  db.query(query, params, (err, result) => {
+    if (err) return res.status(500).json({ mesaj: "Veritabanı hatası." });
+    res.status(200).json({ mesaj: "Profil başarıyla güncellendi." });
+  });
+});
+
+// --- 11. AVATAR YÜKLEME API'Sİ ---
+app.post('/api/avatar-yukle/:id', upload.single('avatar'), (req, res) => {
+  const kullaniciId = req.params.id;
+  if (!req.file) return res.status(400).json({ mesaj: "Lütfen bir dosya seçin." });
+  const avatarUrl = `http://localhost:5000/uploads/${req.file.filename}`;
+  const query = "UPDATE kullanicilar SET avatar = ? WHERE id = ?";
+  db.query(query, [avatarUrl, kullaniciId], (err, result) => {
+    if (err) return res.status(500).json({ mesaj: "Veritabanı hatası." });
+    res.status(200).json({ avatarUrl, mesaj: "Fotoğraf başarıyla yüklendi." });
+  });
+});
+
+// --- 12. AVATAR SİLME API'Sİ ---
+app.put('/api/avatar-sil/:id', (req, res) => {
+  const kullaniciId = req.params.id;
+  const query = "UPDATE kullanicilar SET avatar = NULL WHERE id = ?";
+  db.query(query, [kullaniciId], (err, result) => {
+    if (err) return res.status(500).json({ mesaj: "Veritabanı hatası." });
+    res.status(200).json({ mesaj: "Fotoğraf başarıyla silindi." });
+  });
+});
+
+// --- 13. ŞİFRE SIFIRLAMA API'Sİ ---
+app.post('/api/sifre-sifirla', async (req, res) => { 
+  const { email, yeniSifre } = req.body;
+  try {
+    const hashedSifre = await bcrypt.hash(yeniSifre, 10);
+    const checkQuery = "SELECT * FROM kullanicilar WHERE email = ?";
+    db.query(checkQuery, [email], (err, result) => {
+      if (err) return res.status(500).json({ mesaj: "Veritabanı hatası." });
+      if (result.length === 0) return res.status(404).json({ mesaj: "Bu e-posta adresine kayıtlı bir hesap bulunamadı." });
+
+      const updateQuery = "UPDATE kullanicilar SET sifre = ? WHERE email = ?";
+      db.query(updateQuery, [hashedSifre, email], (err, updateResult) => {
+        if (err) return res.status(500).json({ mesaj: "Şifre güncellenirken hata oluştu." });
+        res.status(200).json({ mesaj: "Şifreniz başarıyla sıfırlandı!" });
+      });
+    });
+  } catch (error) {
+    res.status(500).json({ mesaj: "Sunucu şifreleme hatası." });
+  }
+});
+
+// ==========================================
+// DEĞERLENDİRME VE İSTATİSTİK API'LERİ
+// ==========================================
+
+// --- 14. YENİ YORUM VE PUAN EKLEME API'Sİ ---
+app.post('/api/degerlendirme', (req, res) => {
+  const { terapist_id, danisan_id, puan, yorum } = req.body;
+  const query = "INSERT INTO degerlendirmeler (terapist_id, danisan_id, puan, yorum) VALUES (?, ?, ?, ?)";
+  db.query(query, [terapist_id, danisan_id, puan, yorum], (err, result) => {
+    if (err) return res.status(500).json({ mesaj: "Değerlendirme kaydedilemedi." });
+    res.status(201).json({ mesaj: "Değerlendirmeniz başarıyla yayınlandı!" });
+  });
+});
+
+
+
+// --- 15. TERAPİST PROFİLİ İÇİN İSTATİSTİK VE YORUM ÇEKME API'Sİ ---
+app.get('/api/terapist-detay/:id', (req, res) => {
+  const terapistId = req.params.id;
+
+  const yorumQuery = `
+    SELECT d.puan, d.yorum, d.tarih, k.ad_soyad, k.avatar 
+    FROM degerlendirmeler d 
+    JOIN kullanicilar k ON d.danisan_id = k.id 
+    WHERE d.terapist_id = ? 
+    ORDER BY d.tarih DESC
+  `;
+  
+  db.query(yorumQuery, [terapistId], (err, yorumlar) => {
+    if (err) return res.status(500).json({ mesaj: "Yorumlar çekilemedi." });
+    
+    const ortalamaPuan = yorumlar.length > 0 
+      ? (yorumlar.reduce((acc, y) => acc + y.puan, 0) / yorumlar.length).toFixed(1)
+      : "5.0";
+
+    // YENİ: Zeynep Hoca gibi eski kayıtları da kapsayan LEFT JOIN'li akıllı sorgu
+    const istatistikQuery = `
+      SELECT 
+        (SELECT COUNT(DISTINCT danisan_id) FROM randevular WHERE terapist_id = ?) as gercekDanisan,
+        COALESCE(t.tecrube, k.tecrube, '12 Yıl') as tecrube 
+      FROM kullanicilar k
+      LEFT JOIN terapist_detaylari t ON k.id = t.kullanici_id 
+      WHERE k.id = ?
+    `;
+    
+    db.query(istatistikQuery, [terapistId, terapistId], (err, statResult) => {
+      let toplamDanisan = 0;
+      
+      // statResult boş dönmeyeceği için artık tüm terapistler hesaplamaya dahil olacak
+      if (!err && statResult.length > 0) {
+        const gercekDanisan = statResult[0].gercekDanisan || 0;
+        const tecrubeMetni = statResult[0].tecrube; 
+        
+        // Tecrübe metninden sadece sayıyı alıyoruz
+        const yil = parseInt(tecrubeMetni.replace(/[^0-9]/g, '')) || 1;
+        
+        const faraziTaban = yil * 140; 
+        toplamDanisan = faraziTaban + gercekDanisan;
+      }
+      
+      res.status(200).json({ 
+        yorumlar: yorumlar, 
+        gercekPuan: ortalamaPuan, 
+        toplamDanisan: toplamDanisan 
+      });
+    });
+  });
+});
+
+// --- 16. TÜM TERAPİSTLERİN GÜNCEL PUANLARINI GETİRME API'Sİ ---
+app.get('/api/terapist-puanlari', (req, res) => {
+  const query = `
+    SELECT terapist_id, ROUND(AVG(puan), 1) as gercekPuan, COUNT(*) as yorumSayisi 
+    FROM degerlendirmeler 
+    GROUP BY terapist_id
+    ORDER BY gercekPuan DESC
+  `;
+  db.query(query, (err, results) => {
+    if (err) return res.status(500).json({ mesaj: "Veritabanı hatası" });
+    res.status(200).json(results);
+  });
+});
+
+// --- 17. TERAPİST RANDEVULARINI GETİRME API'Sİ ---
+app.get('/api/terapist-randevulari/:id', (req, res) => {
+  // Sütun hatası vermemesi için sadece var olan "randevu_tarihi"ni çekiyoruz
+  const query = `
+    SELECT r.id, r.randevu_tarihi, r.durum, k.ad_soyad AS danisan_adi 
+    FROM randevular r 
+    JOIN kullanicilar k ON r.danisan_id = k.id 
+    WHERE r.terapist_id = ?
+    ORDER BY r.randevu_tarihi ASC
+  `;
+  
+  db.query(query, [req.params.id], (err, results) => {
+    if (err) {
+      console.error("Randevu Çekme Hatası:", err);
+      return res.status(500).json({ mesaj: "Hata" });
+    }
+    
+    // Veritabanından gelen ham tarihi Javascript ile ustaca parçalayıp, 
+    // Dashboard ve Takvim'in beklediği kesin formatlara çeviriyoruz
+    const formatliSonuclar = results.map(r => {
+      const d = new Date(r.randevu_tarihi);
+      
+      const gun = String(d.getDate()).padStart(2, '0');
+      const ay = String(d.getMonth() + 1).padStart(2, '0');
+      const yil = d.getFullYear();
+      
+      const saat = String(d.getHours()).padStart(2, '0');
+      const dakika = String(d.getMinutes()).padStart(2, '0');
+      
+      return {
+        id: r.id,
+        // GÜNCELLEME: Eğer durum 'kapali_gun' ise isme "TÜM GÜN KAPALI" yazdırıyoruz
+        danisan_adi: r.durum === 'kapali_gun' ? 'TÜM GÜN KAPALI' : r.danisan_adi,
+        durum: r.durum || 'onaylandi',
+        randevu_tarihi: `${gun}.${ay}.${yil}`, // Takvim için örnek: "03.06.2026"
+        // GÜNCELLEME: Gün kapalıysa saat yerine "İptal Edildi" gösteriyoruz
+        randevu_saati: r.durum === 'kapali_gun' ? 'İptal Edildi' : `${saat}:${dakika}` 
+      };
+    });
+    
+    res.status(200).json(formatliSonuclar);
+  });
+});
+
+// --- 18. KULLANICI BİLGİLERİNİ GETİRME API'Sİ ---
+app.get('/api/kullanici/:id', (req, res) => {
+  const userId = req.params.id;
+  db.query("SELECT id, ad_soyad, email, rol, uzmanlik, tecrube, slogan, hakkinda FROM kullanicilar WHERE id = ?", [userId], (err, results) => {
+    if (err || results.length === 0) return res.status(404).json({ mesaj: "Kullanıcı bulunamadı." });
+    res.status(200).json(results[0]);
+  });
+});
+
+// --- 19. PROFİL GÜNCELLEME API'Sİ ---
+app.put('/api/kullanici-guncelle/:id', (req, res) => {
+  const userId = req.params.id;
+  const { ad_soyad, email, uzmanlik, tecrube, slogan, hakkinda, rol } = req.body;
+  let query = "";
+  let degerler = [];
+
+  if (rol === 'terapist') {
+    query = "UPDATE kullanicilar SET ad_soyad=?, email=?, uzmanlik=?, tecrube=?, slogan=?, hakkinda=? WHERE id=?";
+    degerler = [ad_soyad, email, uzmanlik, tecrube, slogan, hakkinda, userId];
+  } else {
+    query = "UPDATE kullanicilar SET ad_soyad=?, email=? WHERE id=?";
+    degerler = [ad_soyad, email, userId];
+  }
+
+  db.query(query, degerler, (err, result) => {
+    if (err) return res.status(500).json({ mesaj: "Profil güncellenirken bir hata oluştu." });
+    res.status(200).json({ mesaj: "Profil bilgileriniz başarıyla güncellendi!" });
+  });
+});
+
+// =================================================================
+// --- 20-24. GELİŞMİŞ MESAJLAŞMA VE BİLDİRİM API'LERİ ---
+// =================================================================
+
+// 20. İZİNLİ KİŞİLERİ GETİR (Gizlilik Kuralı)
+app.get('/api/mesaj-kisileri/:id/:rol', (req, res) => {
+  const { id, rol } = req.params;
+  let query = "";
+
+  if (rol === 'terapist') {
+    query = `SELECT DISTINCT k.id, k.ad_soyad, k.avatar 
+             FROM kullanicilar k 
+             JOIN randevular r ON k.id = r.danisan_id 
+             WHERE r.terapist_id = ?`;
+  } else {
+    query = `SELECT DISTINCT k.id, k.ad_soyad, k.avatar 
+             FROM kullanicilar k 
+             JOIN randevular r ON k.id = r.terapist_id 
+             WHERE r.danisan_id = ?`;
+  }
+
+  db.query(query, [id], (err, results) => {
+    if (err) return res.status(500).json({ mesaj: "Kişiler çekilemedi." });
+    res.status(200).json(results);
+  });
+});
+
+// 21. İKİ KİŞİ ARASINDAKİ MESAJ GEÇMİŞİNİ GETİR
+app.get('/api/mesajlar/:kullanici1/:kullanici2', (req, res) => {
+  const { kullanici1, kullanici2 } = req.params;
+  const query = `SELECT * FROM mesajlar 
+                 WHERE (gonderen_id = ? AND alici_id = ?) OR (gonderen_id = ? AND alici_id = ?) 
+                 ORDER BY olusturulma_tarihi ASC`;
+                 
+  db.query(query, [kullanici1, kullanici2, kullanici2, kullanici1], (err, results) => {
+    if (err) return res.status(500).json({ mesaj: "Mesajlar çekilemedi." });
+    res.status(200).json(results);
+  });
+});
+
+// 22. YENİ MESAJ GÖNDER
+app.post('/api/mesaj', (req, res) => {
+  const { gonderen_id, alici_id, icerik } = req.body;
+  const query = "INSERT INTO mesajlar (gonderen_id, alici_id, icerik) VALUES (?, ?, ?)";
+  
+  db.query(query, [gonderen_id, alici_id, icerik], (err, result) => {
+    if (err) return res.status(500).json({ mesaj: "Mesaj gönderilemedi." });
+    res.status(201).json({ mesaj: "Gönderildi", id: result.insertId });
+  });
+});
+
+// 23. OKUNMAMIŞ BİLDİRİMLERİ GETİR (Çan İkonu İçin)
+app.get('/api/bildirimler/:id', (req, res) => {
+  const userId = req.params.id;
+  const query = `
+    SELECT m.gonderen_id, k.ad_soyad, COUNT(m.id) as okunmamis_sayisi 
+    FROM mesajlar m 
+    JOIN kullanicilar k ON m.gonderen_id = k.id 
+    WHERE m.alici_id = ? AND m.okundu_mu = FALSE 
+    GROUP BY m.gonderen_id, k.ad_soyad`;
+
+  db.query(query, [userId], (err, results) => {
+    if (err) return res.status(500).json({ mesaj: "Bildirimler çekilemedi." });
+    res.status(200).json(results);
+  });
+});
+
+// 24. MESAJLARI OKUNDU OLARAK İŞARETLE
+app.put('/api/mesajlar/okundu/:gonderenId/:aliciId', (req, res) => {
+  const { gonderenId, aliciId } = req.params;
+  const query = "UPDATE mesajlar SET okundu_mu = TRUE WHERE gonderen_id = ? AND alici_id = ?";
+  
+  db.query(query, [gonderenId, aliciId], (err, result) => {
+    if (err) return res.status(500).json({ mesaj: "Güncellenemedi." });
+    res.status(200).json({ mesaj: "Okundu işaretlendi." });
+  });
+});
+
+// --- 25. TERAPİSTİN KENDİ DANIŞANLARINI GETİRME API'Sİ ---
+app.get('/api/terapist-danisanlari/:id', (req, res) => {
+  // Sadece bu terapistten "onaylandi" durumunda randevusu olan danışanları gruplayarak getirir
+  const query = `
+    SELECT k.id, k.ad_soyad, k.email, k.avatar, COUNT(r.id) as toplam_randevu 
+    FROM kullanicilar k 
+    JOIN randevular r ON k.id = r.danisan_id 
+    WHERE r.terapist_id = ? AND r.durum = 'onaylandi'
+    GROUP BY k.id, k.ad_soyad, k.email, k.avatar
+  `;
+  
+  db.query(query, [req.params.id], (err, results) => {
+    if (err) return res.status(500).json({ mesaj: "Danışanlar çekilemedi." });
+    res.status(200).json(results);
+  });
+});
+
+// =================================================================
+// --- GÜN KAPATMA VE AÇMA API'LERİ ---
+// =================================================================
+
+// --- 26. GÜN KAPATMA VE OTOMATİK BİLDİRİM API'Sİ ---
+app.post('/api/gun-kapat', (req, res) => {
+  const { terapist_id, tarih_db, tarih_gosterim } = req.body;
+  const arananTarih = tarih_db + '%';
+
+  db.query("SELECT * FROM randevular WHERE terapist_id = ? AND randevu_tarihi LIKE ? AND durum = 'onaylandi'", [terapist_id, arananTarih], (err, randevular) => {
+      if (err) return res.status(500).json({ mesaj: "Randevular okunamadı." });
+
+      randevular.forEach(r => {
+          const d = new Date(r.randevu_tarihi);
+          const saat = String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+          const iptalMesaji = `🚨 SİSTEM BİLDİRİMİ: ${tarih_gosterim} saat ${saat} tarihindeki randevunuz terapistinizin acil bir programı nedeniyle iptal edilmiştir.`;
+          db.query("INSERT INTO mesajlar (gonderen_id, alici_id, icerik) VALUES (?, ?, ?)", [terapist_id, r.danisan_id, iptalMesaji]);
+      });
+
+      db.query("DELETE FROM randevular WHERE terapist_id = ? AND randevu_tarihi LIKE ?", [terapist_id, arananTarih], (err2) => {
+          if (err2) return res.status(500).json({ mesaj: "Eski randevular silinemedi." });
+          
+          // GÜNCELLEME: MySQL tarih formatı krizlerini aşmak için 00:00:00 yerine 12:00:00 atıyoruz
+          const kapaliTarih = `${tarih_db} 12:00:00`;
+          
+          db.query("INSERT INTO randevular (danisan_id, terapist_id, randevu_tarihi, durum) VALUES (?, ?, ?, 'kapali_gun')", [terapist_id, terapist_id, kapaliTarih], (err3) => {
+              if (err3) {
+                  console.error("KAPATMA HATASI:", err3);
+                  return res.status(500).json({ mesaj: "Veritabanı günü kapatmayı reddetti: " + err3.message });
+              }
+              res.status(200).json({ mesaj: "Gün kapatıldı." });
+          });
+      });
+  });
+});
+
+// --- 27. GÜNÜ TEKRAR AÇMA API'Sİ ---
+app.post('/api/gun-ac', (req, res) => {
+  const { terapist_id, tarih_db } = req.body;
+  const arananTarih = tarih_db + '%';
+  
+  db.query("DELETE FROM randevular WHERE terapist_id = ? AND randevu_tarihi LIKE ? AND durum = 'kapali_gun'", [terapist_id, arananTarih], (err) => {
+      if (err) return res.status(500).json({ mesaj: "Gün açılamadı." });
+      res.status(200).json({ mesaj: "Gün tekrar açıldı." });
+  });
+});
+
+// =================================================================
+// --- 28. DUYGU DURUMU BİLDİRİM API'Sİ ---
+// =================================================================
+app.post('/api/duygu-bildirimi', (req, res) => {
+  const { danisan_id, danisan_adi, duygu } = req.body;
+  
+  // 1. Sadece bu danışanın aktif ("onaylandi") randevusu olan terapistleri bul
+  const query = "SELECT DISTINCT terapist_id FROM randevular WHERE danisan_id = ? AND durum = 'onaylandi'";
+  
+  db.query(query, [danisan_id], (err, results) => {
+    if (err) return res.status(500).json({ mesaj: "Veritabanı hatası" });
+    
+    // 2. Eğer danışanın randevulu terapistleri varsa, hepsine otomatik sistem mesajı at
+    if (results.length > 0) {
+      const mesajMetni = `🔔 SİSTEM BİLDİRİMİ: Danışanınız ${danisan_adi}, anlık duygu durumunu "${duygu}" olarak güncelledi.`;
+      
+      results.forEach(row => {
+        // Mesajlar tablomuza kaydediyoruz (Böylece terapistin ekranında anında çan ötecek)
+        db.query("INSERT INTO mesajlar (gonderen_id, alici_id, icerik) VALUES (?, ?, ?)", [danisan_id, row.terapist_id, mesajMetni]);
+      });
+    }
+    res.status(200).json({ mesaj: "Bildirimler ilgili terapistlere başarıyla iletildi." });
+  });
+});
+
+// Sunucuyu Başlatma
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () => {
+  console.log(`Sunucu ${PORT} portunda çalışmaya başladı...`);
+});
